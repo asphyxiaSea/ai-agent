@@ -11,7 +11,7 @@ def main() -> None:
     reload = True
 
     uvicorn.run(
-        "app.main:app",
+        "main:app",
         host=host,
         port=port,
         reload=reload,
