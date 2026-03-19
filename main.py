@@ -28,25 +28,8 @@ def create_app() -> FastAPI:
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
-    app.include_router(pdf_structured_router, prefix="/langchain-app")
+    app.include_router(pdf_structured_router, prefix="/ai-agent")
     return app
 
 
 app = create_app()
-
-
-def main() -> None:
-    host = "0.0.0.0"
-    port = 8010
-    reload = True
-
-    uvicorn.run(
-        "main:app",
-        host=host,
-        port=port,
-        reload=reload,
-    )
-
-
-if __name__ == "__main__":
-    main()

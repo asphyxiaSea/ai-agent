@@ -12,9 +12,10 @@ from app.application.pipelines.pdf_structured_pipeline import (
     run_pdf_structured_pipeline,
 )
 from app.core.errors import ExternalServiceError, InvalidRequestError
-from app.domain.schemas import create_schema_model
+from app.domain.build_schema import get_schema_model
 
-router = APIRouter(tags=["langchain-app"])
+
+router = APIRouter(tags=["files parse"])
 
 
 @router.post("/files/parse")
@@ -28,10 +29,28 @@ async def parse_pdf_to_structured(
     if not files:
         raise InvalidRequestError(message="No files provided")
 
+    #  解析 schema
     try:
-        payload = SchemaPayload.model_validate(json.loads(schema_payload_json))
-    except Exception as exc:
-        raise InvalidRequestError(message="Invalid schema payload", detail=str(exc)) from exc
+        schema_payload = SchemaPayload.parse_json(schema_payload_json)
+    except Exception as e:
+        raise InvalidRequestError(
+            message="Invalid schema payload",
+            detail=str(e),
+        ) from e
+
+    try:
+        # 自动装配 Schema
+        schema_model = get_schema_model(
+            schema_name=schema_payload.schema_name,
+            fields=schema_payload.fields,
+        )
+    except Exception as e:
+        # 捕获 get_schema_model 内部可能抛出的所有错误
+        raise InvalidRequestError(
+            message="Schema的格式不正确，检查字段类型及格式",
+            detail=str(e),
+        ) from e
+    
 
     try:
         pdf_process_dict = json.loads(pdf_process) if pdf_process else None
@@ -46,11 +65,6 @@ async def parse_pdf_to_structured(
         raise InvalidRequestError(message="pdf_process 必须是 JSON object")
     if text_process_dict is not None and not isinstance(text_process_dict, dict):
         raise InvalidRequestError(message="text_process 必须是 JSON object")
-
-    schema_model = create_schema_model(
-        schema_name=payload.schema_name,
-        fields=payload.fields,
-    )
 
     uploaded_temp_paths: list[str] = []
     results: list[dict] = []
