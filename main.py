@@ -35,8 +35,8 @@ def create_app() -> FastAPI:
     app = FastAPI(title="langchain app")
     app.add_exception_handler(AppError, app_error_handler)
     app.get("/health")(health)
-    app.include_router(pdf_structured_router, prefix="/ai-agent")
-    app.include_router(vegetation_analysis_router, prefix="/ai-agent")
+    app.include_router(pdf_structured_router, prefix="/ai-workflow")
+    app.include_router(vegetation_analysis_router, prefix="/ai-workflow")
     return app
 
 
