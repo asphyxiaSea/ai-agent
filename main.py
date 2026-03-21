@@ -6,6 +6,9 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from app.api.router.vegetation_analysis_router import (
+    router as vegetation_analysis_router,
+)
 from app.api.router.pdf_structured_router import router as pdf_structured_router
 from app.core.errors import AppError
 
@@ -33,6 +36,7 @@ def create_app() -> FastAPI:
     app.add_exception_handler(AppError, app_error_handler)
     app.get("/health")(health)
     app.include_router(pdf_structured_router, prefix="/ai-agent")
+    app.include_router(vegetation_analysis_router, prefix="/ai-agent")
     return app
 
 
