@@ -7,12 +7,10 @@ from typing import List, Optional
 
 from fastapi import APIRouter, File, Form, UploadFile
 
-from app.api.models import SchemaPayload
 from app.application.pipelines.pdf_structured_pipeline import (
     run_pdf_structured_pipeline,
 )
 from app.core.errors import ExternalServiceError, InvalidRequestError
-from app.domain.build_schema import get_schema_model
 
 
 router = APIRouter(tags=["files parse"])
@@ -23,33 +21,23 @@ async def parse_pdf_to_structured(
     system_prompt: Optional[str] = Form(None),
     pdf_process: Optional[str] = Form(None),
     text_process: Optional[str] = Form(None),
-    schema_payload_json: str = Form(...),
+    schema_model_json: str = Form(...),
     files: List[UploadFile] = File(...),
 ) -> dict:
     if not files:
         raise InvalidRequestError(message="No files provided")
 
-    #  解析 schema
+    # 解析 schema_model
     try:
-        schema_payload = SchemaPayload.parse_json(schema_payload_json)
+        schema_model = json.loads(schema_model_json)
     except Exception as e:
         raise InvalidRequestError(
-            message="Invalid schema payload",
+            message="Invalid schema_model JSON",
             detail=str(e),
         ) from e
 
-    try:
-        # 自动装配 Schema
-        schema_model = get_schema_model(
-            schema_name=schema_payload.schema_name,
-            fields=schema_payload.fields,
-        )
-    except Exception as e:
-        # 捕获 get_schema_model 内部可能抛出的所有错误
-        raise InvalidRequestError(
-            message="Schema的格式不正确，检查字段类型及格式",
-            detail=str(e),
-        ) from e
+    if not isinstance(schema_model, dict):
+        raise InvalidRequestError(message="schema_model 必须是 JSON object")
     
 
     try:
