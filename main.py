@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from typing import cast
 
 import uvicorn
@@ -9,6 +10,7 @@ from fastapi.responses import JSONResponse
 from app.api.router.vegetation_analysis_router import (
     router as vegetation_analysis_router,
 )
+from app.application.rag_task_queue import get_rag_task_queue_service
 from app.api.router.pdf_structured_router import router as pdf_structured_router
 from app.api.router.rag_router import router as rag_router
 from app.core.errors import AppError
@@ -32,8 +34,18 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@asynccontextmanager
+async def app_lifespan(app: FastAPI):
+    rag_task_queue = get_rag_task_queue_service()
+    await rag_task_queue.start()
+    try:
+        yield
+    finally:
+        await rag_task_queue.stop()
+
+
 def create_app() -> FastAPI:
-    app = FastAPI(title="langchain app")
+    app = FastAPI(title="langchain app", lifespan=app_lifespan)
     app.add_exception_handler(AppError, app_error_handler)
     app.get("/health")(health)
     app.include_router(pdf_structured_router, prefix="/ai-workflow")

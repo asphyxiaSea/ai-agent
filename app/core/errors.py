@@ -36,3 +36,15 @@ class ExternalServiceError(AppError):
     status_code = 502
     code = "external_service_error"
     message = "外部服务异常"
+
+
+class QueueFullError(AppError):
+    status_code = 503
+    code = "queue_full"
+    message = "任务队列已满，请稍后重试"
+
+
+class TaskNotFoundError(AppError):
+    status_code = 404
+    code = "task_not_found"
+    message = "任务不存在或已过期"
