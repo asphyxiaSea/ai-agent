@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import StrEnum
 from time import time
-from typing import Any, Literal
+from typing import Any, Awaitable, Callable, Literal
 from uuid import uuid4
 
+from app.api.models import FileItem
+from app.application.pipelines.pdf_structured_pipeline import run_pdf_structured_pipeline
 from app.application.pipelines.rag_chat_pipeline import run_rag_chat_pipeline
-from app.core.errors import QueueFullError, TaskNotFoundError
+from app.application.pipelines.vegetation_analysis_pipeline import (
+    run_vegetation_analysis_pipeline,
+)
+from app.core.errors import InvalidRequestError, QueueFullError, TaskNotFoundError
 from app.core.settings import (
     RAG_TASK_CLEANUP_INTERVAL_SECONDS,
     RAG_TASK_QUEUE_MAXSIZE,
@@ -21,11 +26,19 @@ from app.core.settings import (
 
 
 TaskStatus = Literal["PENDING", "RUNNING", "SUCCESS", "FAILED"]
+TaskHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
+
+
+class TaskType(StrEnum):
+    RAG_CHAT = "rag_chat"
+    PDF_STRUCTURED = "pdf_structured"
+    VEGETATION_ANALYSIS = "vegetation_analysis"
 
 
 @dataclass
-class RagTaskRecord:
+class TaskRecord:
     task_id: str
+    task_type: TaskType
     status: TaskStatus
     payload: dict[str, Any]
     created_at: float
@@ -34,7 +47,7 @@ class RagTaskRecord:
     error: str | None = None
 
 
-class RagTaskQueueService:
+class TaskDispatcherService:
     def __init__(
         self,
         *,
@@ -44,7 +57,7 @@ class RagTaskQueueService:
         result_ttl_seconds: int,
         cleanup_interval_seconds: int,
     ) -> None:
-        self._queue: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue(
+        self._queue: asyncio.Queue[tuple[str, TaskType, dict[str, Any]]] = asyncio.Queue(
             maxsize=max(queue_maxsize, 1)
         )
         self._worker_count = max(worker_count, 1)
@@ -52,12 +65,16 @@ class RagTaskQueueService:
         self._result_ttl_seconds = max(result_ttl_seconds, 60)
         self._cleanup_interval_seconds = max(cleanup_interval_seconds, 10)
 
-        self._tasks: dict[str, RagTaskRecord] = {}
+        self._handlers: dict[TaskType, TaskHandler] = {}
+        self._tasks: dict[str, TaskRecord] = {}
         self._task_lock = asyncio.Lock()
         self._workers: list[asyncio.Task[None]] = []
         self._cleanup_task: asyncio.Task[None] | None = None
         self._started = False
         self._logger = logging.getLogger(__name__)
+
+    def register_handler(self, task_type: TaskType, handler: TaskHandler) -> None:
+        self._handlers[task_type] = handler
 
     async def start(self) -> None:
         if self._started:
@@ -65,12 +82,15 @@ class RagTaskQueueService:
 
         self._started = True
         self._workers = [
-            asyncio.create_task(self._worker_loop(worker_index), name=f"rag-worker-{worker_index}")
+            asyncio.create_task(
+                self._worker_loop(worker_index),
+                name=f"dispatcher-worker-{worker_index}",
+            )
             for worker_index in range(self._worker_count)
         ]
-        self._cleanup_task = asyncio.create_task(self._cleanup_loop(), name="rag-cleanup")
+        self._cleanup_task = asyncio.create_task(self._cleanup_loop(), name="dispatcher-cleanup")
         self._logger.info(
-            "RAG task queue started: workers=%s, queue_maxsize=%s",
+            "Task dispatcher started: workers=%s, queue_maxsize=%s",
             self._worker_count,
             self._queue.maxsize,
         )
@@ -91,19 +111,23 @@ class RagTaskQueueService:
 
         self._workers = []
         self._cleanup_task = None
-        self._logger.info("RAG task queue stopped")
+        self._logger.info("Task dispatcher stopped")
 
-    async def submit_task(self, payload: dict[str, Any]) -> str:
+    async def submit_task(self, *, task_type: TaskType, payload: dict[str, Any]) -> str:
         if not self._started:
-            raise RuntimeError("RAG task queue is not started")
+            raise RuntimeError("Task dispatcher is not started")
+
+        if task_type not in self._handlers:
+            raise InvalidRequestError(message="未注册的任务类型", detail=str(task_type))
 
         if self._queue.full():
             raise QueueFullError()
 
         task_id = uuid4().hex
         now = time()
-        record = RagTaskRecord(
+        record = TaskRecord(
             task_id=task_id,
+            task_type=task_type,
             status="PENDING",
             payload=payload,
             created_at=now,
@@ -114,7 +138,7 @@ class RagTaskQueueService:
             self._tasks[task_id] = record
 
         try:
-            self._queue.put_nowait((task_id, payload))
+            self._queue.put_nowait((task_id, task_type, payload))
         except asyncio.QueueFull as exc:
             async with self._task_lock:
                 self._tasks.pop(task_id, None)
@@ -131,6 +155,7 @@ class RagTaskQueueService:
 
         return {
             "task_id": task.task_id,
+            "task_type": task.task_type,
             "status": task.status,
             "created_at": self._format_timestamp(task.created_at),
             "updated_at": self._format_timestamp(task.updated_at),
@@ -143,25 +168,20 @@ class RagTaskQueueService:
 
     async def _worker_loop(self, worker_index: int) -> None:
         while True:
-            task_id, payload = await self._queue.get()
+            task_id, task_type, payload = await self._queue.get()
             try:
                 await self._mark_running(task_id)
                 started_at = time()
                 result = await asyncio.wait_for(
-                    run_rag_chat_pipeline(
-                        question=str(payload["question"]),
-                        collection_name=payload.get("collection_name"),
-                        knowledge_domain=payload.get("knowledge_domain"),
-                        book_id=payload.get("book_id"),
-                        top_k=payload.get("top_k"),
-                    ),
+                    self._dispatch(task_type, payload),
                     timeout=self._task_timeout_seconds,
                 )
                 await self._mark_success(task_id, result)
                 cost_ms = int((time() - started_at) * 1000)
                 self._logger.info(
-                    "RAG task success: task_id=%s worker=%s cost_ms=%s queue_size=%s",
+                    "Task success: task_id=%s task_type=%s worker=%s cost_ms=%s queue_size=%s",
                     task_id,
+                    task_type,
                     worker_index,
                     cost_ms,
                     self._queue.qsize(),
@@ -169,21 +189,29 @@ class RagTaskQueueService:
             except asyncio.TimeoutError:
                 await self._mark_failed(task_id, "任务执行超时")
                 self._logger.warning(
-                    "RAG task timeout: task_id=%s worker=%s queue_size=%s",
+                    "Task timeout: task_id=%s task_type=%s worker=%s queue_size=%s",
                     task_id,
+                    task_type,
                     worker_index,
                     self._queue.qsize(),
                 )
-            except Exception as exc:  # pragma: no cover - defensive branch
+            except Exception as exc:  # pragma: no cover
                 await self._mark_failed(task_id, str(exc))
                 self._logger.exception(
-                    "RAG task failed: task_id=%s worker=%s queue_size=%s",
+                    "Task failed: task_id=%s task_type=%s worker=%s queue_size=%s",
                     task_id,
+                    task_type,
                     worker_index,
                     self._queue.qsize(),
                 )
             finally:
                 self._queue.task_done()
+
+    async def _dispatch(self, task_type: TaskType, payload: dict[str, Any]) -> dict[str, Any]:
+        handler = self._handlers.get(task_type)
+        if not handler:
+            raise InvalidRequestError(message="未注册的任务处理器", detail=str(task_type))
+        return await handler(payload)
 
     async def _cleanup_loop(self) -> None:
         while True:
@@ -199,7 +227,7 @@ class RagTaskQueueService:
                 for task_id in expired_ids:
                     self._tasks.pop(task_id, None)
             if expired_ids:
-                self._logger.info("Cleaned expired RAG tasks: count=%s", len(expired_ids))
+                self._logger.info("Cleaned expired tasks: count=%s", len(expired_ids))
 
     async def _mark_running(self, task_id: str) -> None:
         async with self._task_lock:
@@ -230,20 +258,78 @@ class RagTaskQueueService:
     def _format_timestamp(ts: float) -> str:
         return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
 
+# 防御校验
+async def _run_rag_chat_task(payload: dict[str, Any]) -> dict[str, Any]:
+    return await run_rag_chat_pipeline(
+        question=str(payload["question"]),
+        collection_name=payload.get("collection_name"),
+        knowledge_domain=payload.get("knowledge_domain"),
+        book_id=payload.get("book_id"),
+        top_k=payload.get("top_k"),
+    )
 
-_rag_task_queue_service = RagTaskQueueService(
+# 防御校验
+async def _run_pdf_structured_task(payload: dict[str, Any]) -> dict[str, Any]:
+    pdf_path = payload.get("pdf_path")
+    schema_model = payload.get("schema_model")
+    if not isinstance(pdf_path, str) or not pdf_path.strip():
+        raise InvalidRequestError(message="pdf_path 缺失或非法")
+    if not isinstance(schema_model, dict):
+        raise InvalidRequestError(message="schema_model 缺失或非法")
+
+    return await run_pdf_structured_pipeline(
+        pdf_path=pdf_path,
+        schema_model=schema_model,
+        system_prompt=str(payload.get("system_prompt") or ""),
+        pdf_process=payload.get("pdf_process") if isinstance(payload.get("pdf_process"), dict) else None,
+        text_process=payload.get("text_process") if isinstance(payload.get("text_process"), dict) else None,
+    )
+
+
+def _to_file_item(value: Any, field_name: str) -> FileItem:
+    if isinstance(value, FileItem):
+        return value
+    if isinstance(value, dict):
+        try:
+            return FileItem.model_validate(value)
+        except Exception as exc:  # pragma: no cover
+            raise InvalidRequestError(message="文件参数不合法", detail={"field": field_name}) from exc
+    raise InvalidRequestError(message="文件参数不合法", detail={"field": field_name})
+
+# 防御校验
+async def _run_vegetation_analysis_task(payload: dict[str, Any]) -> dict[str, Any]:
+    config = payload.get("config")
+    if not isinstance(config, dict):
+        raise InvalidRequestError(message="config 缺失或非法")
+
+    origin_file_item = _to_file_item(payload.get("origin_file_item"), "origin_file_item")
+    ndvi_file_item = _to_file_item(payload.get("ndvi_file_item"), "ndvi_file_item")
+    gndvi_file_item = _to_file_item(payload.get("gndvi_file_item"), "gndvi_file_item")
+    lci_file_item = _to_file_item(payload.get("lci_file_item"), "lci_file_item")
+
+    return await run_vegetation_analysis_pipeline(
+        origin_file_item=origin_file_item,
+        ndvi_file_item=ndvi_file_item,
+        gndvi_file_item=gndvi_file_item,
+        lci_file_item=lci_file_item,
+        config=config,
+    )
+
+
+_task_dispatcher_service = TaskDispatcherService(
     queue_maxsize=RAG_TASK_QUEUE_MAXSIZE,
     worker_count=RAG_TASK_WORKER_COUNT,
     task_timeout_seconds=RAG_TASK_TIMEOUT_SECONDS,
     result_ttl_seconds=RAG_TASK_RESULT_TTL_SECONDS,
     cleanup_interval_seconds=RAG_TASK_CLEANUP_INTERVAL_SECONDS,
 )
+_task_dispatcher_service.register_handler(TaskType.RAG_CHAT, _run_rag_chat_task)
+_task_dispatcher_service.register_handler(TaskType.PDF_STRUCTURED, _run_pdf_structured_task)
+_task_dispatcher_service.register_handler(
+    TaskType.VEGETATION_ANALYSIS,
+    _run_vegetation_analysis_task,
+)
 
 
-def get_rag_task_queue_service() -> RagTaskQueueService:
-    return _rag_task_queue_service
-
-
-async def stop_rag_task_queue_quietly() -> None:
-    with contextlib.suppress(Exception):
-        await _rag_task_queue_service.stop()
+def get_task_dispatcher_service() -> TaskDispatcherService:
+    return _task_dispatcher_service

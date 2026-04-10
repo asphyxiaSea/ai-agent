@@ -5,7 +5,7 @@ from typing import Any
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from app.application.rag_task_queue import get_rag_task_queue_service
+from app.application.task_dispatcher import TaskType, get_task_dispatcher_service
 from app.core.settings import RAG_DEFAULT_KNOWLEDGE_DOMAIN
 from app.core.errors import AppError, ExternalServiceError, InvalidRequestError
 
@@ -24,15 +24,16 @@ class RagChatRequest(BaseModel):
 @router.post("/rag/chat")
 async def rag_chat(body: RagChatRequest) -> dict[str, Any]:
     try:
-        rag_task_queue = get_rag_task_queue_service()
-        task_id = await rag_task_queue.submit_task(
-            {
+        dispatcher = get_task_dispatcher_service()
+        task_id = await dispatcher.submit_task(
+            task_type=TaskType.RAG_CHAT,
+            payload={
                 "question": body.question,
                 "collection_name": body.collection_name,
                 "knowledge_domain": body.knowledge_domain,
                 "book_id": body.book_id,
                 "top_k": body.top_k,
-            }
+            },
         )
         return {
             "task_id": task_id,
@@ -48,14 +49,14 @@ async def rag_chat(body: RagChatRequest) -> dict[str, Any]:
 
 @router.get("/rag/chat/tasks/{task_id}")
 async def rag_chat_task_status(task_id: str) -> dict[str, Any]:
-    rag_task_queue = get_rag_task_queue_service()
-    return await rag_task_queue.get_task_snapshot(task_id)
+    dispatcher = get_task_dispatcher_service()
+    return await dispatcher.get_task_snapshot(task_id)
 
 
 @router.get("/rag/chat/tasks/{task_id}/result")
 async def rag_chat_task_result(task_id: str) -> dict[str, Any]:
-    rag_task_queue = get_rag_task_queue_service()
-    task = await rag_task_queue.get_task_snapshot(task_id)
+    dispatcher = get_task_dispatcher_service()
+    task = await dispatcher.get_task_snapshot(task_id)
     status = task["status"]
 
     if status in ("PENDING", "RUNNING"):
