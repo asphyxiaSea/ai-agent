@@ -1,16 +1,12 @@
 from __future__ import annotations
 
 import json
-import os
-from tempfile import NamedTemporaryFile
 from typing import List, Optional
 
 from fastapi import APIRouter, File, Form, UploadFile
 
-from app.application.pipelines.pdf_structured_pipeline import (
-    run_pdf_structured_pipeline,
-)
-from app.core.errors import ExternalServiceError, InvalidRequestError
+from app.application.task_dispatcher import TaskType, get_task_dispatcher_service
+from app.core.errors import AppError, ExternalServiceError, InvalidRequestError
 
 
 router = APIRouter(tags=["files parse"])
@@ -54,41 +50,83 @@ async def parse_pdf_to_structured(
     if text_process_dict is not None and not isinstance(text_process_dict, dict):
         raise InvalidRequestError(message="text_process 必须是 JSON object")
 
-    uploaded_temp_paths: list[str] = []
-    results: list[dict] = []
-    extracted_texts: list[str] = []
     try:
+        file_payloads: list[dict] = []
         for file in files:
             if file.content_type != "application/pdf":
                 raise InvalidRequestError(message="仅支持 PDF 文件", detail=file.content_type)
 
             content = await file.read()
-            with NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
-                temp_file.write(content)
-                temp_path = temp_file.name
-                uploaded_temp_paths.append(temp_path)
-
-            result = await run_pdf_structured_pipeline(
-                pdf_path=temp_path,
-                schema_model=schema_model,
-                system_prompt=system_prompt or "",
-                pdf_process=pdf_process_dict,
-                text_process=text_process_dict,
+            file_payloads.append(
+                {
+                    "filename": file.filename,
+                    "content_type": file.content_type,
+                    "data": content,
+                }
             )
-            results.append(result.get("structured_output", {}))
-            extracted_texts.append(result.get("extracted_text", ""))
+
+        dispatcher = get_task_dispatcher_service()
+        task_id = await dispatcher.submit_task(
+            task_type=TaskType.PDF_STRUCTURED,
+            payload={
+                "schema_model": schema_model,
+                "system_prompt": system_prompt or "",
+                "pdf_process": pdf_process_dict,
+                "text_process": text_process_dict,
+                "files": file_payloads,
+            },
+        )
 
         return {
-            "results": results,
-            "extracted_texts": extracted_texts,
+            "task_id": task_id,
+            "status": "PENDING",
         }
     except InvalidRequestError:
         raise
+    except AppError:
+        raise
     except Exception as exc:
-        raise ExternalServiceError(message="PDF 结构化提取失败", detail=str(exc)) from exc
+        raise ExternalServiceError(message="PDF 任务提交失败", detail=str(exc)) from exc
     finally:
         for file in files:
             await file.close()
-        for temp_path in uploaded_temp_paths:
-            if temp_path and os.path.exists(temp_path):
-                os.remove(temp_path)
+
+
+@router.get("/files/parse/tasks/{task_id}")
+async def parse_pdf_task_status(task_id: str) -> dict:
+    dispatcher = get_task_dispatcher_service()
+    task = await dispatcher.get_task_snapshot(task_id)
+    if task.get("task_type") != TaskType.PDF_STRUCTURED:
+        raise InvalidRequestError(message="任务类型不匹配")
+    return task
+
+
+@router.get("/files/parse/tasks/{task_id}/result")
+async def parse_pdf_task_result(task_id: str) -> dict:
+    dispatcher = get_task_dispatcher_service()
+    task = await dispatcher.get_task_snapshot(task_id)
+    if task.get("task_type") != TaskType.PDF_STRUCTURED:
+        raise InvalidRequestError(message="任务类型不匹配")
+
+    status = task["status"]
+    if status in ("PENDING", "RUNNING"):
+        return {
+            "task_id": task_id,
+            "status": status,
+            "message": "任务尚未完成",
+        }
+
+    if status == "FAILED":
+        return {
+            "task_id": task_id,
+            "status": status,
+            "error": task.get("error", "任务执行失败"),
+        }
+
+    result = task.get("result") or {}
+    return {
+        "task_id": task_id,
+        "status": status,
+        "results": result.get("results", []),
+        "extracted_texts": result.get("extracted_texts", []),
+    }

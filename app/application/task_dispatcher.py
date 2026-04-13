@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
+from tempfile import NamedTemporaryFile
 from time import time
 from typing import Any, Awaitable, Callable, Literal
 from uuid import uuid4
@@ -270,19 +272,66 @@ async def _run_rag_chat_task(payload: dict[str, Any]) -> dict[str, Any]:
 
 # 防御校验
 async def _run_pdf_structured_task(payload: dict[str, Any]) -> dict[str, Any]:
-    pdf_path = payload.get("pdf_path")
     schema_model = payload.get("schema_model")
-    if not isinstance(pdf_path, str) or not pdf_path.strip():
-        raise InvalidRequestError(message="pdf_path 缺失或非法")
     if not isinstance(schema_model, dict):
         raise InvalidRequestError(message="schema_model 缺失或非法")
+
+    system_prompt = str(payload.get("system_prompt") or "")
+    pdf_process = payload.get("pdf_process") if isinstance(payload.get("pdf_process"), dict) else None
+    text_process = payload.get("text_process") if isinstance(payload.get("text_process"), dict) else None
+
+    files = payload.get("files")
+    if isinstance(files, list):
+        results: list[dict[str, Any]] = []
+        extracted_texts: list[str] = []
+        temp_paths: list[str] = []
+        try:
+            for item in files:
+                if not isinstance(item, dict):
+                    raise InvalidRequestError(message="files 参数不合法")
+
+                content_type = item.get("content_type")
+                if content_type != "application/pdf":
+                    raise InvalidRequestError(message="仅支持 PDF 文件", detail=content_type)
+
+                data = item.get("data")
+                if not isinstance(data, bytes) or not data:
+                    raise InvalidRequestError(message="PDF 文件内容为空")
+
+                with NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
+                    temp_file.write(data)
+                    temp_path = temp_file.name
+                    temp_paths.append(temp_path)
+
+                result = await run_pdf_structured_pipeline(
+                    pdf_path=temp_path,
+                    schema_model=schema_model,
+                    system_prompt=system_prompt,
+                    pdf_process=pdf_process,
+                    text_process=text_process,
+                )
+                results.append(result.get("structured_output", {}))
+                extracted_texts.append(result.get("extracted_text", ""))
+
+            return {
+                "results": results,
+                "extracted_texts": extracted_texts,
+            }
+        finally:
+            for temp_path in temp_paths:
+                if temp_path and os.path.exists(temp_path):
+                    os.remove(temp_path)
+
+    pdf_path = payload.get("pdf_path")
+    if not isinstance(pdf_path, str) or not pdf_path.strip():
+        raise InvalidRequestError(message="pdf_path 缺失或非法")
 
     return await run_pdf_structured_pipeline(
         pdf_path=pdf_path,
         schema_model=schema_model,
-        system_prompt=str(payload.get("system_prompt") or ""),
-        pdf_process=payload.get("pdf_process") if isinstance(payload.get("pdf_process"), dict) else None,
-        text_process=payload.get("text_process") if isinstance(payload.get("text_process"), dict) else None,
+        system_prompt=system_prompt,
+        pdf_process=pdf_process,
+        text_process=text_process,
     )
 
 

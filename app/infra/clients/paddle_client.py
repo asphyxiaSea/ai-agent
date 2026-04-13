@@ -7,7 +7,11 @@ import httpx
 from app.core.settings import PADDLE_EXTRACT_PATH_URL
 
 
-async def paddle_extract_pdf_text(pdf_path: str, timeout: float = 120.0) -> str:
+async def paddle_extract_pdf_text(
+    pdf_path: str,
+    timeout: float = 120.0,
+    pipeline: str | None = None,
+) -> str:
     """Extract markdown text from a local PDF path via external Paddle service."""
 
     path = Path(pdf_path)
@@ -17,11 +21,15 @@ async def paddle_extract_pdf_text(pdf_path: str, timeout: float = 120.0) -> str:
     if path.suffix.lower() != ".pdf":
         raise ValueError(f"Only PDF files are supported: {pdf_path}")
 
+    params: dict[str, str] = {"path": str(path)}
+    if pipeline:
+        params["pipeline"] = pipeline
+
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
                 PADDLE_EXTRACT_PATH_URL,
-                params={"pipeline": "default", "path": str(path)},
+                params=params,
             )
             response.raise_for_status()
             data = response.json()
