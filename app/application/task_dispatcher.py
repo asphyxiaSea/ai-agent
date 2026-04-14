@@ -19,11 +19,11 @@ from app.application.pipelines.vegetation_analysis_pipeline import (
 )
 from app.core.errors import InvalidRequestError, QueueFullError, TaskNotFoundError
 from app.core.settings import (
-    RAG_TASK_CLEANUP_INTERVAL_SECONDS,
-    RAG_TASK_QUEUE_MAXSIZE,
-    RAG_TASK_RESULT_TTL_SECONDS,
-    RAG_TASK_TIMEOUT_SECONDS,
-    RAG_TASK_WORKER_COUNT,
+    TASK_CLEANUP_INTERVAL_SECONDS,
+    TASK_QUEUE_MAXSIZE,
+    TASK_RESULT_TTL_SECONDS,
+    TASK_TIMEOUT_SECONDS,
+    TASK_WORKER_COUNT,
 )
 
 
@@ -366,11 +366,11 @@ async def _run_vegetation_analysis_task(payload: dict[str, Any]) -> dict[str, An
 
 
 _task_dispatcher_service = TaskDispatcherService(
-    queue_maxsize=RAG_TASK_QUEUE_MAXSIZE,
-    worker_count=RAG_TASK_WORKER_COUNT,
-    task_timeout_seconds=RAG_TASK_TIMEOUT_SECONDS,
-    result_ttl_seconds=RAG_TASK_RESULT_TTL_SECONDS,
-    cleanup_interval_seconds=RAG_TASK_CLEANUP_INTERVAL_SECONDS,
+    queue_maxsize=TASK_QUEUE_MAXSIZE,
+    worker_count=TASK_WORKER_COUNT,
+    task_timeout_seconds=TASK_TIMEOUT_SECONDS,
+    result_ttl_seconds=TASK_RESULT_TTL_SECONDS,
+    cleanup_interval_seconds=TASK_CLEANUP_INTERVAL_SECONDS,
 )
 _task_dispatcher_service.register_handler(TaskType.RAG_CHAT, _run_rag_chat_task)
 _task_dispatcher_service.register_handler(TaskType.PDF_STRUCTURED, _run_pdf_structured_task)
